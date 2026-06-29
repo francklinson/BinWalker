@@ -1,0 +1,25 @@
+# Rust
+src-tauri/target/
+
+# Node
+node_modules/
+
+# Build output
+dist/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp test files
+squashfs_test*
+squashfs_test_out*
+
+# Firmware samples (large binary files)
+firmware_samples/
