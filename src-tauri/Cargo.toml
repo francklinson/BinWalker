@@ -20,6 +20,8 @@ flate2 = "1"
 backhand = { version = "0.19", default-features = false, features = ["gzip-zune-inflate", "lzo"] }
 oxiarc-lzma = "0.3"
 lzma-rs = "0.3"
+bzip2 = "0.6"
+tar = "0.4"
 
 [features]
 default = ["custom-protocol"]

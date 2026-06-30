@@ -2,7 +2,7 @@
 
 mod commands;
 
-use commands::{scan_file, get_entropy, extract_file, deep_scan};
+use commands::{scan_file, get_entropy, extract_file, deep_scan, open_file_location};
 
 fn main() {
     tauri::Builder::default()
@@ -12,7 +12,8 @@ fn main() {
             scan_file,
             get_entropy,
             extract_file,
-            deep_scan
+            deep_scan,
+            open_file_location
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

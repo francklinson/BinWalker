@@ -55,6 +55,78 @@ pub struct DeepScanItem {
 const MAX_DEPTH: u32 = 10;
 
 #[tauri::command]
+pub async fn open_file_location(path: String) -> Result<(), String> {
+    let log_file = std::env::temp_dir().join("binwalker_debug.log");
+    let mut log_content = format!("=== open_file_location 被调用 ===\n");
+    log_content.push_str(&format!("原始路径: {}\n", path));
+    
+    let file_path = PathBuf::from(&path);
+    
+    if !file_path.exists() {
+        log_content.push_str(&format!("路径不存在: {}\n", path));
+        let _ = std::fs::write(&log_file, log_content);
+        return Err(format!("路径不存在: {}", path));
+    }
+    
+    log_content.push_str("路径存在\n");
+
+    #[cfg(target_os = "windows")]
+    {
+        use std::os::windows::process::CommandExt;
+        
+        let file_abs = match std::fs::canonicalize(&file_path) {
+            Ok(p) => p,
+            Err(e) => {
+                log_content.push_str(&format!("canonicalize 失败: {}\n", e));
+                let _ = std::fs::write(&log_file, log_content);
+                return Err(format!("无法获取绝对路径: {}", e));
+            }
+        };
+        
+        log_content.push_str(&format!("绝对路径: {:?}\n", file_abs));
+        
+        let file_str = file_abs.to_string_lossy().to_string();
+        let clean_path = file_str.strip_prefix(r"\\?\").unwrap_or(&file_str).to_string();
+        log_content.push_str(&format!("清理后路径: {}\n", clean_path));
+        
+        // explorer /select 需要文件路径，会打开所在目录并选中该文件
+        let arg = format!(r#"/select,"{}""#, clean_path);
+        log_content.push_str(&format!("执行命令: explorer {}\n", arg));
+        
+        match std::process::Command::new("explorer.exe")
+            .raw_arg(&arg)
+            .spawn()
+        {
+            Ok(_) => log_content.push_str("命令已启动\n"),
+            Err(e) => log_content.push_str(&format!("命令启动失败: {}\n", e)),
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        std::process::Command::new("open")
+            .arg("-R")
+            .arg(&file_path)
+            .spawn()
+            .map_err(|e| format!("打开文件位置失败: {}", e))?;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        let parent = file_path.parent().unwrap_or(&file_path);
+        std::process::Command::new("xdg-open")
+            .arg(parent)
+            .spawn()
+            .map_err(|e| format!("打开文件位置失败: {}", e))?;
+    }
+
+    log_content.push_str("=== 函数执行完成 ===\n");
+    let _ = std::fs::write(&log_file, log_content);
+    
+    Ok(())
+}
+
+#[tauri::command]
 pub async fn deep_scan(path: String) -> Result<Vec<DeepScanItem>, String> {
     let file_path = PathBuf::from(&path);
 
@@ -287,39 +359,253 @@ pub async fn extract_file(path: String, output_dir: String) -> Result<Vec<Extrac
 
         let extracted_data = &file_data[start..end];
         let name_lower = result.name.to_lowercase();
+        let base_name = format!("{}_0x{:x}", result.name, result.offset);
 
-        let (final_name, final_data) = if name_lower.contains("gzip") {
-            match decompress_gzip(extracted_data) {
-                Ok(decompressed) => (
-                    format!("{}_0x{:x}_decompressed.bin", result.name, result.offset),
-                    decompressed,
-                ),
-                Err(_) => (
-                    format!("{}_0x{:x}.bin", result.name, result.offset),
-                    extracted_data.to_vec(),
-                ),
-            }
-        } else {
-            (
-                format!("{}_0x{:x}.bin", result.name, result.offset),
-                extracted_data.to_vec(),
-            )
-        };
-
-        let output_file = output_path.join(&final_name);
-
-        if fs::write(&output_file, &final_data).is_ok() {
-            extracted_files.push(ExtractedFile {
-                name: final_name,
-                path: output_file.to_string_lossy().to_string(),
-                size: final_data.len() as u64,
-                original_offset: result.offset as u64,
-                file_type: result.name.clone(),
-            });
-        }
+        extract_component(
+            extracted_data,
+            &name_lower,
+            &base_name,
+            &output_path,
+            result.offset as u64,
+            &result.name,
+            &mut extracted_files,
+            0,
+        );
     }
 
     Ok(extracted_files)
+}
+
+fn extract_component(
+    data: &[u8],
+    type_hint: &str,
+    base_name: &str,
+    output_dir: &PathBuf,
+    original_offset: u64,
+    original_type: &str,
+    extracted_files: &mut Vec<ExtractedFile>,
+    depth: u32,
+) {
+    if depth > 5 || data.is_empty() {
+        return;
+    }
+
+    // Try gzip
+    if type_hint.contains("gzip") || (data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B) {
+        if let Ok(decompressed) = decompress_gzip(data) {
+            let inner_name = format!("{}_decompressed", base_name);
+            let inner_type = detect_type_from_data(&decompressed);
+            if inner_type != "data" {
+                extract_component(
+                    &decompressed,
+                    &inner_type,
+                    &inner_name,
+                    output_dir,
+                    original_offset,
+                    original_type,
+                    extracted_files,
+                    depth + 1,
+                );
+            } else {
+                save_extracted_file(&decompressed, &inner_name, "bin", output_dir, original_offset, original_type, extracted_files);
+            }
+            return;
+        }
+    }
+
+    // Try bzip2
+    if type_hint.contains("bzip2") || (data.len() >= 3 && &data[0..3] == b"BZh") {
+        if let Ok(decompressed) = decompress_bzip2(data) {
+            let inner_name = format!("{}_decompressed", base_name);
+            let inner_type = detect_type_from_data(&decompressed);
+            if inner_type != "data" {
+                extract_component(&decompressed, &inner_type, &inner_name, output_dir, original_offset, original_type, extracted_files, depth + 1);
+            } else {
+                save_extracted_file(&decompressed, &inner_name, "bin", output_dir, original_offset, original_type, extracted_files);
+            }
+            return;
+        }
+    }
+
+    // Try xz
+    if type_hint.contains("xz") || (data.len() >= 6 && data[0..6] == [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00]) {
+        if let Ok(decompressed) = decompress_xz(data) {
+            let inner_name = format!("{}_decompressed", base_name);
+            let inner_type = detect_type_from_data(&decompressed);
+            if inner_type != "data" {
+                extract_component(&decompressed, &inner_type, &inner_name, output_dir, original_offset, original_type, extracted_files, depth + 1);
+            } else {
+                save_extracted_file(&decompressed, &inner_name, "bin", output_dir, original_offset, original_type, extracted_files);
+            }
+            return;
+        }
+    }
+
+    // Try lzma
+    if type_hint.contains("lzma") || (data.len() >= 1 && data[0] == 0x5D) {
+        if let Ok(decompressed) = decompress_lzma(data) {
+            let inner_name = format!("{}_decompressed", base_name);
+            let inner_type = detect_type_from_data(&decompressed);
+            if inner_type != "data" {
+                extract_component(&decompressed, &inner_type, &inner_name, output_dir, original_offset, original_type, extracted_files, depth + 1);
+            } else {
+                save_extracted_file(&decompressed, &inner_name, "bin", output_dir, original_offset, original_type, extracted_files);
+            }
+            return;
+        }
+    }
+
+    // Try squashfs
+    if type_hint.contains("squashfs") || (data.len() >= 4 && &data[0..4] == b"hsqs") {
+        if let Ok(files) = unpack_squashfs(data) {
+            let squashfs_dir = output_dir.join(format!("{}_squashfs-root", base_name));
+            let _ = fs::create_dir_all(&squashfs_dir);
+            for (file_path, file_data) in &files {
+                let file_path_obj = squashfs_dir.join(file_path);
+                if let Some(parent) = file_path_obj.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::write(&file_path_obj, file_data).is_ok() {
+                    extracted_files.push(ExtractedFile {
+                        name: file_path.clone(),
+                        path: file_path_obj.to_string_lossy().to_string(),
+                        size: file_data.len() as u64,
+                        original_offset,
+                        file_type: "squashfs-inner".to_string(),
+                    });
+                }
+            }
+            return;
+        }
+    }
+
+    // Try tar
+    if type_hint.contains("tar") || (data.len() >= 262 && &data[257..262] == b"ustar") {
+        if let Ok(files) = extract_tar(data) {
+            let tar_dir = output_dir.join(format!("{}_tar-root", base_name));
+            let _ = fs::create_dir_all(&tar_dir);
+            for (file_path, file_data) in &files {
+                let file_path_obj = tar_dir.join(file_path);
+                if let Some(parent) = file_path_obj.parent() {
+                    let _ = fs::create_dir_all(parent);
+                }
+                if fs::write(&file_path_obj, file_data).is_ok() {
+                    extracted_files.push(ExtractedFile {
+                        name: file_path.clone(),
+                        path: file_path_obj.to_string_lossy().to_string(),
+                        size: file_data.len() as u64,
+                        original_offset,
+                        file_type: "tar-inner".to_string(),
+                    });
+                }
+            }
+            return;
+        }
+    }
+
+    // Fallback: save raw data with appropriate extension
+    let ext = get_extension_for_type(type_hint);
+    save_extracted_file(data, base_name, ext, output_dir, original_offset, original_type, extracted_files);
+}
+
+fn save_extracted_file(
+    data: &[u8],
+    base_name: &str,
+    ext: &str,
+    output_dir: &PathBuf,
+    original_offset: u64,
+    original_type: &str,
+    extracted_files: &mut Vec<ExtractedFile>,
+) {
+    let final_name = format!("{}.{}", base_name, ext);
+    let output_file = output_dir.join(&final_name);
+    if fs::write(&output_file, data).is_ok() {
+        extracted_files.push(ExtractedFile {
+            name: final_name,
+            path: output_file.to_string_lossy().to_string(),
+            size: data.len() as u64,
+            original_offset,
+            file_type: original_type.to_string(),
+        });
+    }
+}
+
+fn get_extension_for_type(type_hint: &str) -> &str {
+    if type_hint.contains("gzip") { return "gz"; }
+    if type_hint.contains("bzip2") { return "bz2"; }
+    if type_hint.contains("xz") { return "xz"; }
+    if type_hint.contains("lzma") { return "lzma"; }
+    if type_hint.contains("squashfs") { return "squashfs"; }
+    if type_hint.contains("tar") { return "tar"; }
+    if type_hint.contains("elf") { return "elf"; }
+    if type_hint.contains("pe") || type_hint.contains("executable") { return "exe"; }
+    if type_hint.contains("zip") { return "zip"; }
+    if type_hint.contains("jpeg") || type_hint.contains("jpg") { return "jpg"; }
+    if type_hint.contains("png") { return "png"; }
+    if type_hint.contains("gif") { return "gif"; }
+    if type_hint.contains("pdf") { return "pdf"; }
+    if type_hint.contains("rsa") || type_hint.contains("private key") { return "pem"; }
+    if type_hint.contains("certificate") { return "crt"; }
+    "bin"
+}
+
+fn detect_type_from_data(data: &[u8]) -> String {
+    if data.len() < 4 { return "data".to_string(); }
+    if data.len() >= 2 && data[0] == 0x1F && data[1] == 0x8B { return "gzip".to_string(); }
+    if data.len() >= 3 && &data[0..3] == b"BZh" { return "bzip2".to_string(); }
+    if data.len() >= 6 && data[0..6] == [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00] { return "xz".to_string(); }
+    if data.len() >= 4 && &data[0..4] == b"hsqs" { return "squashfs".to_string(); }
+    if data.len() >= 262 && &data[257..262] == b"ustar" { return "tar".to_string(); }
+    if data.len() >= 4 && data[0] == 0x7F && &data[1..4] == b"ELF" { return "elf".to_string(); }
+    if data.len() >= 2 && data[0] == 0x4D && data[1] == 0x5A { return "pe".to_string(); }
+    if data.len() >= 4 && &data[0..4] == b"PK\x03\x04" { return "zip".to_string(); }
+    if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" { return "png".to_string(); }
+    if data.len() >= 3 && &data[0..3] == b"\xFF\xD8\xFF" { return "jpeg".to_string(); }
+    if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") { return "gif".to_string(); }
+    if data.len() >= 4 && &data[0..4] == b"%PDF" { return "pdf".to_string(); }
+    if data.starts_with(b"-----BEGIN") { return "pem".to_string(); }
+    "data".to_string()
+}
+
+fn decompress_bzip2(data: &[u8]) -> Result<Vec<u8>, String> {
+    use bzip2::read::BzDecoder;
+    let mut decoder = BzDecoder::new(data);
+    let mut decompressed = Vec::new();
+    decoder.read_to_end(&mut decompressed)
+        .map_err(|e| format!("Bzip2 解压失败: {}", e))?;
+    Ok(decompressed)
+}
+
+fn decompress_xz(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cursor = std::io::Cursor::new(data);
+    let mut decompressed = Vec::new();
+    lzma_rs::xz_decompress(&mut cursor, &mut decompressed)
+        .map_err(|e| format!("XZ 解压失败: {}", e))?;
+    Ok(decompressed)
+}
+
+fn decompress_lzma(data: &[u8]) -> Result<Vec<u8>, String> {
+    let mut cursor = std::io::Cursor::new(data);
+    let mut decompressed = Vec::new();
+    lzma_rs::lzma_decompress(&mut cursor, &mut decompressed)
+        .map_err(|e| format!("LZMA 解压失败: {}", e))?;
+    Ok(decompressed)
+}
+
+fn extract_tar(data: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    use std::io::Read;
+    let mut archive = tar::Archive::new(data);
+    let mut files = Vec::new();
+    for entry in archive.entries().map_err(|e| format!("Tar 解析失败: {}", e))? {
+        let mut entry = entry.map_err(|e| format!("Tar 条目读取失败: {}", e))?;
+        let path = entry.path().map_err(|e| format!("Tar 路径读取失败: {}", e))?.to_string_lossy().to_string();
+        let mut file_data = Vec::new();
+        entry.read_to_end(&mut file_data).map_err(|e| format!("Tar 数据读取失败: {}", e))?;
+        if !file_data.is_empty() {
+            files.push((path, file_data));
+        }
+    }
+    Ok(files)
 }
 
 fn decompress_gzip(data: &[u8]) -> Result<Vec<u8>, String> {

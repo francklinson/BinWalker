@@ -265,6 +265,50 @@ async function selectFile() {
     console.error("选择文件失败:", error);
   }
 }
+
+async function openFileLocation(path: string) {
+  try {
+    await invoke("open_file_location", { path });
+  } catch (error) {
+    console.error("打开文件位置失败:", error);
+    alert(`打开文件位置失败: ${error}`);
+  }
+}
+
+const extractSortBy = ref<string>("name");
+const extractSortOrder = ref<"asc" | "desc">("asc");
+
+const sortedExtractedFiles = computed(() => {
+  const files = [...extractedFiles.value];
+  files.sort((a, b) => {
+    let comparison = 0;
+    switch (extractSortBy.value) {
+      case "name":
+        comparison = a.name.localeCompare(b.name);
+        break;
+      case "size":
+        comparison = a.size - b.size;
+        break;
+      case "type":
+        comparison = a.file_type.localeCompare(b.file_type);
+        break;
+      case "offset":
+        comparison = a.original_offset - b.original_offset;
+        break;
+    }
+    return extractSortOrder.value === "asc" ? comparison : -comparison;
+  });
+  return files;
+});
+
+function toggleExtractSort(field: string) {
+  if (extractSortBy.value === field) {
+    extractSortOrder.value = extractSortOrder.value === "asc" ? "desc" : "asc";
+  } else {
+    extractSortBy.value = field;
+    extractSortOrder.value = "asc";
+  }
+}
 </script>
 
 <template>
@@ -285,10 +329,57 @@ async function selectFile() {
     </div>
 
     <!-- 提取结果栏 -->
-    <div v-if="showExtracted" class="extract-banner">
-      <span class="extract-icon">&#9889;</span>
-      <span>已自动提取 <strong>{{ extractedFiles.length }}</strong> 个组件到 <code>{{ filePath }}_extracted\</code></span>
-      <button @click="showExtracted = false" class="extract-dismiss">&times;</button>
+    <div v-if="showExtracted" class="extract-section">
+      <div class="extract-header">
+        <h3>提取结果 ({{ extractedFiles.length }} 个文件)</h3>
+        <button @click="showExtracted = false" class="extract-dismiss-btn">&times;</button>
+      </div>
+      <div class="extract-table-container">
+        <table class="extract-table">
+          <thead>
+            <tr>
+              <th @click="toggleExtractSort('name')" class="sortable">
+                文件名
+                <span v-if="extractSortBy === 'name'" class="sort-icon">
+                  {{ extractSortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="toggleExtractSort('type')" class="sortable">
+                类型
+                <span v-if="extractSortBy === 'type'" class="sort-icon">
+                  {{ extractSortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="toggleExtractSort('size')" class="sortable">
+                大小
+                <span v-if="extractSortBy === 'size'" class="sort-icon">
+                  {{ extractSortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th @click="toggleExtractSort('offset')" class="sortable">
+                原始偏移
+                <span v-if="extractSortBy === 'offset'" class="sort-icon">
+                  {{ extractSortOrder === 'asc' ? '↑' : '↓' }}
+                </span>
+              </th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="(file, index) in sortedExtractedFiles" :key="index">
+              <td class="extract-name-cell" :title="file.path">{{ file.name }}</td>
+              <td class="extract-type-cell">{{ file.file_type }}</td>
+              <td class="extract-size-cell">{{ formatSize(file.size) }}</td>
+              <td class="extract-offset-cell">{{ formatOffset(file.original_offset) }}</td>
+              <td class="extract-action-cell">
+                <button @click="openFileLocation(file.path)" class="open-location-btn" title="打开文件位置">
+                  📂
+                </button>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </div>
 
     <div class="result" v-if="scanResults.length > 0">
@@ -1003,5 +1094,155 @@ button:disabled {
   font-family: 'Consolas', 'Monaco', monospace;
   font-weight: 700;
   font-size: 0.85rem;
+}
+
+/* 提取结果表格样式 */
+.extract-section {
+  margin: 1rem 0;
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.extract-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 0.75rem 1rem;
+  background: #0f3460;
+  border-bottom: 1px solid #2a2a4a;
+}
+
+.extract-header h3 {
+  margin: 0;
+  color: #00d4ff;
+  font-size: 1rem;
+  font-weight: 600;
+}
+
+.extract-dismiss-btn {
+  background: none;
+  border: none;
+  color: #888;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  width: 30px;
+  height: 30px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 4px;
+  transition: all 0.2s;
+}
+
+.extract-dismiss-btn:hover {
+  background: #2a2a4a;
+  color: #fff;
+}
+
+.extract-table-container {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.extract-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+.extract-table thead {
+  background: #1a2a4e;
+  position: sticky;
+  top: 0;
+  z-index: 10;
+}
+
+.extract-table th {
+  padding: 0.6rem 1rem;
+  text-align: left;
+  font-weight: 600;
+  color: #00d4ff;
+  border-bottom: 2px solid #2a2a4a;
+  white-space: nowrap;
+  user-select: none;
+}
+
+.extract-table th.sortable {
+  cursor: pointer;
+  transition: background 0.2s;
+}
+
+.extract-table th.sortable:hover {
+  background: #2a3a5e;
+}
+
+.extract-table td {
+  padding: 0.5rem 1rem;
+  border-bottom: 1px solid #2a2a4a;
+  vertical-align: middle;
+}
+
+.extract-table tbody tr {
+  transition: background 0.15s;
+}
+
+.extract-table tbody tr:hover {
+  background: #1a2a4e;
+}
+
+.extract-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.extract-name-cell {
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #e0e0e0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.85rem;
+}
+
+.extract-type-cell {
+  color: #98c379;
+  font-size: 0.8rem;
+}
+
+.extract-size-cell {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #98c379;
+  white-space: nowrap;
+}
+
+.extract-offset-cell {
+  font-family: 'Consolas', 'Monaco', monospace;
+  color: #ffd700;
+  font-weight: 500;
+}
+
+.extract-action-cell {
+  width: 60px;
+  text-align: center;
+}
+
+.open-location-btn {
+  background: transparent;
+  border: 1px solid #2a2a4a;
+  color: #00d4ff;
+  padding: 0.3rem 0.5rem;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.open-location-btn:hover {
+  background: #00d4ff;
+  color: #1a1a2e;
+  border-color: #00d4ff;
 }
 </style>
