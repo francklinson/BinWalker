@@ -24,5 +24,3 @@ squashfs_test_out*
 # Firmware samples (large binary files)
 firmware_samples/
 
-# Local cloned dependencies
-local-binwalk/
