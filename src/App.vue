@@ -96,6 +96,16 @@ function getRiskLabel(level: RiskLevel): string {
   }
 }
 
+function getRiskDescription(level: RiskLevel): string {
+  switch (level) {
+    case "critical": return "加密密钥、证书、敏感凭证（PEM、RSA、OpenSSL、AES、GPG、LUKS、Certificate）";
+    case "high": return "可执行文件、固件组件（ELF、PE、UEFI）";
+    case "medium": return "文件系统（SquashFS、JFFS2、CramFS、UBI、YAFFS、EXT、FAT、NTFS）";
+    case "low": return "压缩格式（Gzip、Bzip2、XZ、LZMA、Tar、Zip）";
+    case "info": return "其他签名、元数据、字符串等";
+  }
+}
+
 const resultsWithRisk = computed(() => {
   return scanResults.value.map(r => ({
     ...r,
@@ -256,7 +266,17 @@ async function selectFile() {
     const { open } = await import("@tauri-apps/plugin-dialog");
     const selected = await open({
       multiple: false,
-      filters: [{ name: "固件文件", extensions: ["bin", "img", "fw"] }],
+      filters: [
+        { 
+          name: "固件文件", 
+          extensions: [
+            "bin", "img", "fw", "hex", "dfu", "elf",
+            "tar", "gz", "bz2", "xz", "lzma",
+            "ubi", "ubifs", "jffs2", "cramfs", "squashfs",
+            "rom", "flash", "firmware"
+          ] 
+        }
+      ],
     });
     if (selected) {
       filePath.value = selected as string;
@@ -386,8 +406,8 @@ function toggleExtractSort(field: string) {
       <div class="result-header">
         <h2>扫描结果 ({{ filteredResults.length }} / {{ scanResults.length }})</h2>
         <div class="risk-summary">
-          <div 
-            v-for="level in (['critical', 'high', 'medium', 'low', 'info'] as RiskLevel[])" 
+          <div
+            v-for="level in (['critical', 'high', 'medium', 'low', 'info'] as RiskLevel[])"
             :key="level"
             class="risk-badge"
             :class="{ active: filterRisk === level }"
@@ -398,6 +418,14 @@ function toggleExtractSort(field: string) {
             <span class="risk-badge-count" :style="'color:' + getRiskColor(level)">
               {{ riskCounts[level] }}
             </span>
+            <div class="risk-tooltip">
+              <div class="risk-tooltip-title" :style="{ color: getRiskColor(level) }">
+                {{ getRiskLabel(level) }}风险
+              </div>
+              <div class="risk-tooltip-content">
+                {{ getRiskDescription(level) }}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -717,6 +745,7 @@ button:disabled {
   cursor: pointer;
   transition: all 0.2s;
   opacity: 0.7;
+  position: relative;
 }
 
 .risk-badge:hover {
@@ -727,6 +756,43 @@ button:disabled {
 .risk-badge.active {
   opacity: 1;
   background: rgba(255, 255, 255, 0.05);
+}
+
+.risk-tooltip {
+  position: absolute;
+  top: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  margin-top: 8px;
+  padding: 10px 14px;
+  background: rgba(20, 20, 30, 0.95);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 6px;
+  min-width: 280px;
+  max-width: 320px;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+  z-index: 1000;
+  pointer-events: none;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+}
+
+.risk-badge:hover .risk-tooltip {
+  opacity: 1;
+  visibility: visible;
+}
+
+.risk-tooltip-title {
+  font-size: 0.9rem;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+
+.risk-tooltip-content {
+  font-size: 0.8rem;
+  color: #b0b0b0;
+  line-height: 1.5;
 }
 
 .risk-badge-label {

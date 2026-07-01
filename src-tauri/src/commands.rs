@@ -6,10 +6,8 @@ use backhand::{
 use binwalk::Binwalk;
 use flate2::read::GzDecoder;
 use serde::{Deserialize, Serialize};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashSet;
 use std::fs;
-use std::hash::{Hash, Hasher};
 use std::io::{BufReader, Cursor, Read};
 use std::path::PathBuf;
 use oxiarc_lzma;
@@ -138,17 +136,11 @@ pub async fn deep_scan(path: String) -> Result<Vec<DeepScanItem>, String> {
         .map_err(|e| format!("读取文件失败: {}", e))?;
 
     let mut results = Vec::new();
-    let mut seen_hashes = HashSet::new();
+    let mut seen_offsets = HashSet::new();
 
-    recursive_scan(&file_data, 0, None, None, "original".to_string(), &mut results, &mut seen_hashes);
+    recursive_scan(&file_data, 0, None, None, "original".to_string(), &mut results, &mut seen_offsets);
 
     Ok(results)
-}
-
-fn hash_data(data: &[u8]) -> u64 {
-    let mut hasher = DefaultHasher::new();
-    data.hash(&mut hasher);
-    hasher.finish()
 }
 
 fn recursive_scan(
@@ -158,15 +150,15 @@ fn recursive_scan(
     parent_name: Option<String>,
     source: String,
     results: &mut Vec<DeepScanItem>,
-    seen_hashes: &mut HashSet<u64>,
+    seen_offsets: &mut HashSet<(u32, u64)>,
 ) {
     if data.is_empty() || layer > MAX_DEPTH {
         return;
     }
 
-    // Deduplication: skip data we've already scanned
-    let data_hash = hash_data(data);
-    if !seen_hashes.insert(data_hash) {
+    // 基于位置的智能去重：只跳过已经扫描过的 (layer, absolute_offset) 组合
+    let base_offset = parent_offset.unwrap_or(0);
+    if !seen_offsets.insert((layer, base_offset)) {
         return;
     }
 
@@ -184,93 +176,113 @@ fn recursive_scan(
             continue;
         }
 
+        // 当前项在当前数据块中的相对偏移
+        let relative_offset = result.offset as u64;
+        // 当前项在原始文件中的绝对偏移（仅对未压缩数据准确，用于传递给下一层作为 parent_offset）
+        let absolute_offset = parent_offset.unwrap_or(0) + relative_offset;
+
         results.push(DeepScanItem {
             layer,
-            offset: result.offset as u64,
+            offset: relative_offset, // 保持相对偏移，表示在当前扫描数据中的位置
             size: result.size as u64,
             name: result.name.to_string(),
             description: result.description.to_string(),
             confidence: result.confidence as i32,
-            parent_offset,
+            parent_offset, // 父级数据块在原始文件中的起始偏移
             parent_name: parent_name.clone(),
             source: source.clone(),
         });
 
         let extracted = &data[start..end];
         let name_lower = result.name.to_lowercase();
-
         let child_source = format!("{}_0x{:x}", result.name, result.offset);
-        let child_parent_offset = Some(result.offset as u64);
+        let child_parent_offset = Some(absolute_offset);
         let child_parent_name = Some(result.name.to_string());
 
-        // Try to decompress gzip content before recursive scan
-        if name_lower.contains("gzip") {
-            if let Ok(decompressed) = decompress_gzip(extracted) {
+        // 尝试所有压缩格式的递归解压扫描
+        let mut decompressed = false;
+
+        // gzip
+        if name_lower.contains("gzip") || (extracted.len() >= 2 && extracted[0] == 0x1F && extracted[1] == 0x8B) {
+            if let Ok(dec) = decompress_gzip(extracted) {
                 recursive_scan(
-                    &decompressed,
+                    &dec,
                     layer + 1,
                     child_parent_offset,
-                    child_parent_name,
-                    child_source,
+                    child_parent_name.clone(),
+                    child_source.clone(),
                     results,
-                    seen_hashes,
+                    seen_offsets,
                 );
-                continue;
+                decompressed = true;
             }
         }
 
-        // For SquashFS: unpack the filesystem and scan each inner file
-        if name_lower.contains("squashfs") {
+        // bzip2
+        if !decompressed && (name_lower.contains("bzip2") || (extracted.len() >= 3 && &extracted[0..3] == b"BZh")) {
+            if let Ok(dec) = decompress_bzip2(extracted) {
+                recursive_scan(
+                    &dec,
+                    layer + 1,
+                    child_parent_offset,
+                    child_parent_name.clone(),
+                    child_source.clone(),
+                    results,
+                    seen_offsets,
+                );
+                decompressed = true;
+            }
+        }
+
+        // xz
+        if !decompressed && (name_lower.contains("xz") || (extracted.len() >= 6 && extracted[0..6] == [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00])) {
+            if let Ok(dec) = decompress_xz(extracted) {
+                recursive_scan(
+                    &dec,
+                    layer + 1,
+                    child_parent_offset,
+                    child_parent_name.clone(),
+                    child_source.clone(),
+                    results,
+                    seen_offsets,
+                );
+                decompressed = true;
+            }
+        }
+
+        // lzma
+        if !decompressed && (name_lower.contains("lzma") || (extracted.len() >= 1 && extracted[0] == 0x5D)) {
+            if let Ok(dec) = decompress_lzma(extracted) {
+                recursive_scan(
+                    &dec,
+                    layer + 1,
+                    child_parent_offset,
+                    child_parent_name.clone(),
+                    child_source.clone(),
+                    results,
+                    seen_offsets,
+                );
+                decompressed = true;
+            }
+        }
+
+        // SquashFS: 解包文件系统并扫描每个内部文件
+        if !decompressed && name_lower.contains("squashfs") {
             scan_squashfs_contents(
                 extracted,
                 layer + 1,
                 child_parent_offset,
-                child_parent_name,
+                child_parent_name.clone(),
                 &child_source,
                 results,
-                seen_hashes,
+                seen_offsets,
             );
-            continue;
+            decompressed = true;
         }
 
-        // For non-gzip/non-squashfs: scan extracted data directly
-        recursive_scan(
-            extracted,
-            layer + 1,
-            child_parent_offset,
-            child_parent_name,
-            child_source,
-            results,
-            seen_hashes,
-        );
+        // 对于非压缩格式（如 ELF、PE、RSA 等），不递归扫描
+        // 只有成功解压/解包的压缩格式才需要递归扫描
     }
-}
-
-#[tauri::command]
-pub async fn scan_file(path: String) -> Result<Vec<ScanResult>, String> {
-    let file_path = PathBuf::from(&path);
-    
-    if !file_path.exists() {
-        return Err(format!("文件不存在: {}", path));
-    }
-
-    let file_data = fs::read(&file_path)
-        .map_err(|e| format!("读取文件失败: {}", e))?;
-
-    let binwalker = Binwalk::new();
-    let results: Vec<ScanResult> = binwalker
-        .scan(&file_data)
-        .into_iter()
-        .map(|result| ScanResult {
-            offset: result.offset as u64,
-            size: result.size as u64,
-            name: result.name.to_string(),
-            description: result.description.to_string(),
-            confidence: result.confidence as i32,
-        })
-        .collect();
-
-    Ok(results)
 }
 
 #[tauri::command]
@@ -386,7 +398,7 @@ fn extract_component(
     extracted_files: &mut Vec<ExtractedFile>,
     depth: u32,
 ) {
-    if depth > 5 || data.is_empty() {
+    if depth > MAX_DEPTH || data.is_empty() {
         return;
     }
 
@@ -817,7 +829,7 @@ fn scan_squashfs_contents(
     _parent_name: Option<String>,
     source: &str,
     results: &mut Vec<DeepScanItem>,
-    seen_hashes: &mut HashSet<u64>,
+    seen_offsets: &mut HashSet<(u32, u64)>,
 ) {
     let files = match unpack_squashfs(squashfs_data) {
         Ok(f) => f,
@@ -832,18 +844,42 @@ fn scan_squashfs_contents(
             continue;
         }
 
-        let (detected_name, confidence) = detect_file_type(file_data);
-        results.push(DeepScanItem {
-            layer: layer + 1,
-            offset: 0,
-            size: file_data.len() as u64,
-            name: format!("squashfs_inner/{}", file_path),
-            description: format!("Extracted from SquashFS: {} (detected: {})", file_path, detected_name),
-            confidence,
-            parent_offset,
-            parent_name: Some(format!("squashfs/{}", file_path)),
-            source: source.to_string(),
-        });
+        // 使用 binwalk 完整扫描每个文件，而不是简陋的 detect_file_type
+        let binwalker = Binwalk::new();
+        let scan_results = binwalker.scan(file_data);
+        
+        if scan_results.is_empty() {
+            // 如果 binwalk 没有检测到任何内容，使用 detect_file_type 作为后备
+            let (detected_name, confidence) = detect_file_type(file_data);
+            if detected_name != "data" {
+                results.push(DeepScanItem {
+                    layer: layer + 1,
+                    offset: 0,
+                    size: file_data.len() as u64,
+                    name: format!("squashfs_inner/{}", file_path),
+                    description: format!("Extracted from SquashFS: {} (detected: {})", file_path, detected_name),
+                    confidence,
+                    parent_offset,
+                    parent_name: Some(format!("squashfs/{}", file_path)),
+                    source: source.to_string(),
+                });
+            }
+        } else {
+            // 将 binwalk 扫描结果添加到结果中
+            for result in scan_results {
+                results.push(DeepScanItem {
+                    layer: layer + 1,
+                    offset: result.offset as u64,
+                    size: result.size as u64,
+                    name: format!("squashfs_inner/{}/{}", file_path, result.name),
+                    description: result.description.to_string(),
+                    confidence: result.confidence as i32,
+                    parent_offset,
+                    parent_name: Some(format!("squashfs/{}", file_path)),
+                    source: source.to_string(),
+                });
+            }
+        }
 
         // Recursively scan each file's contents for embedded signatures
         recursive_scan(
@@ -853,7 +889,7 @@ fn scan_squashfs_contents(
             Some(format!("squashfs/{}", file_path)),
             source.to_string(),
             results,
-            seen_hashes,
+            seen_offsets,
         );
     }
 }
