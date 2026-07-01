@@ -27,6 +27,7 @@ type RiskLevel = "critical" | "high" | "medium" | "low" | "info";
 const scanResults = ref<DeepScanItem[]>([]);
 const filePath = ref<string>("");
 const loading = ref<boolean>(false);
+const loadingProgress = ref<string>("");
 const extractedFiles = ref<ExtractedFile[]>([]);
 const showExtracted = ref<boolean>(false);
 const searchQuery = ref<string>("");
@@ -36,6 +37,8 @@ const filterLayer = ref<number | null>(null);
 const sortBy = ref<string>("offset");
 const sortOrder = ref<"asc" | "desc">("asc");
 const showRawModal = ref<boolean>(false);
+const expandedRows = ref<Set<number>>(new Set());
+const copySuccess = ref<string>("");
 
 const nameToRisk: Record<string, RiskLevel> = {
   "pem": "critical", "rsa": "critical", "openssl": "critical", "aes": "critical",
@@ -237,12 +240,14 @@ async function scanFile() {
   }
   
   loading.value = true;
+  loadingProgress.value = "正在扫描固件...";
   showExtracted.value = false;
   try {
     // 1. 深度递归扫描
     const result = await invoke<DeepScanItem[]>("deep_scan", { path: filePath.value });
     scanResults.value = result;
 
+    loadingProgress.value = "正在提取组件...";
     // 2. 自动提取所有组件
     const outputDir = filePath.value + "_extracted";
     const extracted = await invoke<ExtractedFile[]>("extract_file", { 
@@ -258,7 +263,72 @@ async function scanFile() {
     alert(`扫描失败: ${error}`);
   } finally {
     loading.value = false;
+    loadingProgress.value = "";
   }
+}
+
+function toggleRowExpand(index: number) {
+  if (expandedRows.value.has(index)) {
+    expandedRows.value.delete(index);
+  } else {
+    expandedRows.value.add(index);
+  }
+}
+
+async function copyToClipboard(text: string, label: string) {
+  try {
+    await navigator.clipboard.writeText(text);
+    copySuccess.value = label;
+    setTimeout(() => {
+      copySuccess.value = "";
+    }, 2000);
+  } catch (error) {
+    console.error("复制失败:", error);
+  }
+}
+
+function exportToCSV() {
+  const headers = ["层级", "风险", "偏移量", "大小", "类型", "描述", "置信度", "来源"];
+  const rows = filteredResults.value.map(r => [
+    `L${r.layer}`,
+    getRiskLabel(r.risk),
+    formatOffset(r.offset),
+    formatSize(r.size),
+    r.name,
+    `"${r.description.replace(/"/g, '""')}"`,
+    `${normalizeConfidence(r.confidence)}%`,
+    r.parent_name || "-"
+  ]);
+  
+  const csvContent = [
+    headers.join(","),
+    ...rows.map(row => row.join(","))
+  ].join("\n");
+  
+  const blob = new Blob([csvContent], { type: "text/csv;charset=utf-8;" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `binwalker_scan_${Date.now()}.csv`;
+  link.click();
+}
+
+function exportToJSON() {
+  const data = filteredResults.value.map(r => ({
+    layer: r.layer,
+    risk: getRiskLabel(r.risk),
+    offset: formatOffset(r.offset),
+    size: formatSize(r.size),
+    name: r.name,
+    description: r.description,
+    confidence: normalizeConfidence(r.confidence),
+    parent: r.parent_name || null
+  }));
+  
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `binwalker_scan_${Date.now()}.json`;
+  link.click();
 }
 
 async function selectFile() {
@@ -333,19 +403,30 @@ function toggleExtractSort(field: string) {
 
 <template>
   <div class="container">
-    <h1>BinWalker - 固件分析工具</h1>
+    <header class="app-header">
+      <div class="header-content">
+        <h1>BinWalker</h1>
+        <p class="subtitle">固件安全分析工具</p>
+      </div>
+    </header>
     
     <div class="controls">
-      <button @click="selectFile">选择文件</button>
+      <button @click="selectFile" class="btn-primary">选择文件</button>
       <input 
         type="text" 
         v-model="filePath" 
-        placeholder="文件路径" 
+        placeholder="请选择固件文件..." 
         readonly 
       />
-      <button @click="scanFile" :disabled="loading">
-        {{ loading ? "扫描分析中..." : "扫描" }}
+      <button @click="scanFile" :disabled="loading" class="btn-primary">
+        <span v-if="loading" class="loading-spinner"></span>
+        {{ loading ? loadingProgress || "分析中..." : "开始分析" }}
       </button>
+    </div>
+
+    <!-- 复制成功提示 -->
+    <div v-if="copySuccess" class="copy-toast">
+      已复制: {{ copySuccess }}
     </div>
 
     <!-- 提取结果栏 -->
@@ -403,8 +484,48 @@ function toggleExtractSort(field: string) {
     </div>
 
     <div class="result" v-if="scanResults.length > 0">
+      <!-- 统计概览卡片 -->
+      <div class="stats-cards">
+        <div class="stat-card">
+          <div class="stat-icon">📊</div>
+          <div class="stat-content">
+            <div class="stat-value">{{ scanResults.length }}</div>
+            <div class="stat-label">总检测项</div>
+          </div>
+        </div>
+        <div class="stat-card stat-critical">
+          <div class="stat-icon">⚠️</div>
+          <div class="stat-content">
+            <div class="stat-value">{{ riskCounts.critical + riskCounts.high }}</div>
+            <div class="stat-label">高风险项</div>
+          </div>
+        </div>
+        <div class="stat-card stat-medium">
+          <div class="stat-icon">📦</div>
+          <div class="stat-content">
+            <div class="stat-value">{{ riskCounts.medium }}</div>
+            <div class="stat-label">文件系统</div>
+          </div>
+        </div>
+        <div class="stat-card stat-info">
+          <div class="stat-icon">📁</div>
+          <div class="stat-content">
+            <div class="stat-value">{{ extractedFiles.length }}</div>
+            <div class="stat-label">已提取文件</div>
+          </div>
+        </div>
+      </div>
+
       <div class="result-header">
         <h2>扫描结果 ({{ filteredResults.length }} / {{ scanResults.length }})</h2>
+        <div class="result-actions">
+          <button @click="exportToCSV" class="btn-export" title="导出为 CSV">
+            📄 CSV
+          </button>
+          <button @click="exportToJSON" class="btn-export" title="导出为 JSON">
+            📋 JSON
+          </button>
+        </div>
         <div class="risk-summary">
           <div
             v-for="level in (['critical', 'high', 'medium', 'low', 'info'] as RiskLevel[])"
@@ -530,58 +651,112 @@ function toggleExtractSort(field: string) {
             </tr>
           </thead>
           <tbody>
-            <tr 
-              v-for="(result, index) in filteredResults" 
-              :key="index"
-              :class="'risk-row-' + result.risk"
-            >
-              <td>
-                <span class="layer-indicator" :style="{ color: getLayerColor(result.layer) }">
-                  L{{ result.layer }}
-                </span>
-              </td>
-              <td class="risk-cell">
-                <span 
-                  class="risk-tag" 
-                  :style="{ 
-                    backgroundColor: getRiskColor(result.risk),
-                    color: result.risk === 'medium' ? '#000' : '#fff'
-                  }"
-                >
-                  {{ getRiskLabel(result.risk) }}
-                </span>
-              </td>
-              <td class="offset-cell">{{ formatOffset(result.offset) }}</td>
-              <td class="size-cell">{{ formatSize(result.size) }}</td>
-              <td class="name-cell">{{ result.name }}</td>
-              <td class="description-cell">{{ result.description }}</td>
-              <td class="confidence-cell">
-                <div class="confidence-bar">
-                  <div 
-                    class="confidence-fill" 
+            <template v-for="(result, index) in filteredResults" :key="index">
+              <tr 
+                :class="['result-row', 'risk-row-' + result.risk, { expanded: expandedRows.has(index) }]"
+                @click="toggleRowExpand(index)"
+              >
+                <td>
+                  <span class="expand-icon">{{ expandedRows.has(index) ? '▼' : '▶' }}</span>
+                  <span class="layer-indicator" :style="{ color: getLayerColor(result.layer) }">
+                    L{{ result.layer }}
+                  </span>
+                </td>
+                <td class="risk-cell">
+                  <span 
+                    class="risk-tag" 
                     :style="{ 
-                      width: result.confidence + '%',
-                      backgroundColor: getConfidenceColor(result.confidence)
+                      backgroundColor: getRiskColor(result.risk),
+                      color: result.risk === 'medium' ? '#000' : '#fff'
                     }"
-                  ></div>
-                  <span class="confidence-text">{{ normalizeConfidence(result.confidence) }}%</span>
-                </div>
-              </td>
-              <td class="parent-cell">
-                <template v-if="result.parent_name">
-                  <span class="parent-name">{{ result.parent_name }}</span>
-                  <span class="parent-offset">@{{ formatOffset(result.parent_offset!) }}</span>
-                </template>
-                <span v-else class="parent-none">-</span>
-              </td>
-            </tr>
+                  >
+                    {{ getRiskLabel(result.risk) }}
+                  </span>
+                </td>
+                <td class="offset-cell" @click.stop="copyToClipboard(formatOffset(result.offset), '偏移量')">
+                  {{ formatOffset(result.offset) }}
+                  <span class="copy-hint">📋</span>
+                </td>
+                <td class="size-cell">{{ formatSize(result.size) }}</td>
+                <td class="name-cell">{{ result.name }}</td>
+                <td class="description-cell" :title="result.description">{{ result.description }}</td>
+                <td class="confidence-cell">
+                  <div class="confidence-bar">
+                    <div 
+                      class="confidence-fill" 
+                      :style="{ 
+                        width: result.confidence + '%',
+                        backgroundColor: getConfidenceColor(result.confidence)
+                      }"
+                    ></div>
+                    <span class="confidence-text">{{ normalizeConfidence(result.confidence) }}%</span>
+                  </div>
+                </td>
+                <td class="parent-cell">
+                  <template v-if="result.parent_name">
+                    <span class="parent-name">{{ result.parent_name }}</span>
+                    <span class="parent-offset">@{{ formatOffset(result.parent_offset!) }}</span>
+                  </template>
+                  <span v-else class="parent-none">-</span>
+                </td>
+              </tr>
+              <!-- 展开的详情行 -->
+              <tr v-if="expandedRows.has(index)" class="detail-row">
+                <td colspan="8">
+                  <div class="detail-content">
+                    <div class="detail-section">
+                      <h4>完整描述</h4>
+                      <p>{{ result.description }}</p>
+                    </div>
+                    <div class="detail-section">
+                      <h4>来源信息</h4>
+                      <div class="detail-grid">
+                        <div class="detail-item">
+                          <span class="detail-label">层级:</span>
+                          <span class="detail-value">{{ getLayerLabel(result.layer) }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">偏移量:</span>
+                          <span class="detail-value">{{ formatOffset(result.offset) }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">大小:</span>
+                          <span class="detail-value">{{ formatSize(result.size) }}</span>
+                        </div>
+                        <div class="detail-item">
+                          <span class="detail-label">置信度:</span>
+                          <span class="detail-value">{{ normalizeConfidence(result.confidence) }}%</span>
+                        </div>
+                        <div class="detail-item" v-if="result.parent_name">
+                          <span class="detail-label">父级:</span>
+                          <span class="detail-value">{{ result.parent_name }}</span>
+                        </div>
+                        <div class="detail-item" v-if="result.parent_offset">
+                          <span class="detail-label">父级偏移:</span>
+                          <span class="detail-value">{{ formatOffset(result.parent_offset) }}</span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </td>
+              </tr>
+            </template>
           </tbody>
         </table>
       </div>
 
       <div v-if="filteredResults.length === 0" class="no-results">
-        未找到匹配的结果
+        <div class="empty-icon">🔍</div>
+        <h3>未找到匹配的结果</h3>
+        <p>尝试调整筛选条件或搜索关键词</p>
       </div>
+    </div>
+
+    <!-- 空状态 -->
+    <div v-if="scanResults.length === 0 && !loading" class="empty-state">
+      <div class="empty-icon">📡</div>
+      <h3>选择固件文件开始分析</h3>
+      <p>支持 .bin, .img, .fw, .hex, .dfu, .elf, .tar, .gz, .bz2, .xz, .lzma, .ubi, .ubifs, .jffs2, .cramfs, .squashfs, .rom, .flash, .firmware 等格式</p>
     </div>
   </div>
 </template>
@@ -1310,5 +1485,321 @@ button:disabled {
   background: #00d4ff;
   color: #1a1a2e;
   border-color: #00d4ff;
+}
+
+/* 应用头部样式 */
+.app-header {
+  margin-bottom: 2rem;
+  padding: 1.5rem 0;
+  border-bottom: 2px solid #2a2a4a;
+}
+
+.header-content h1 {
+  font-size: 2rem;
+  margin-bottom: 0.5rem;
+  background: linear-gradient(135deg, #00d4ff 0%, #10b981 100%);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+  background-clip: text;
+}
+
+.subtitle {
+  color: #888;
+  font-size: 0.95rem;
+}
+
+/* 统计卡片样式 */
+.stats-cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.stat-card {
+  background: #16213e;
+  border: 1px solid #2a2a4a;
+  border-radius: 8px;
+  padding: 1.25rem;
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+  transition: all 0.2s;
+}
+
+.stat-card:hover {
+  border-color: #00d4ff;
+  transform: translateY(-2px);
+  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.1);
+}
+
+.stat-icon {
+  font-size: 2rem;
+  width: 50px;
+  height: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(0, 212, 255, 0.1);
+  border-radius: 8px;
+}
+
+.stat-critical .stat-icon {
+  background: rgba(239, 68, 68, 0.1);
+}
+
+.stat-medium .stat-icon {
+  background: rgba(245, 158, 11, 0.1);
+}
+
+.stat-info .stat-icon {
+  background: rgba(107, 114, 128, 0.1);
+}
+
+.stat-content {
+  flex: 1;
+}
+
+.stat-value {
+  font-size: 1.75rem;
+  font-weight: 700;
+  color: #00d4ff;
+  margin-bottom: 0.25rem;
+}
+
+.stat-critical .stat-value {
+  color: #ef4444;
+}
+
+.stat-medium .stat-value {
+  color: #f59e0b;
+}
+
+.stat-info .stat-value {
+  color: #6b7280;
+}
+
+.stat-label {
+  font-size: 0.85rem;
+  color: #888;
+}
+
+/* 结果操作按钮 */
+.result-actions {
+  display: flex;
+  gap: 0.5rem;
+  margin-left: 1rem;
+}
+
+.btn-export {
+  padding: 0.4rem 0.8rem;
+  background: transparent;
+  border: 1px solid #2a2a4a;
+  color: #b0b0b0;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: all 0.2s;
+}
+
+.btn-export:hover {
+  border-color: #00d4ff;
+  color: #00d4ff;
+  background: rgba(0, 212, 255, 0.05);
+}
+
+/* 复制提示 */
+.copy-toast {
+  position: fixed;
+  top: 20px;
+  right: 20px;
+  background: #10b981;
+  color: #fff;
+  padding: 0.75rem 1.25rem;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  box-shadow: 0 4px 12px rgba(16, 185, 129, 0.3);
+  z-index: 2000;
+  animation: slideIn 0.3s ease;
+}
+
+@keyframes slideIn {
+  from {
+    transform: translateX(100%);
+    opacity: 0;
+  }
+  to {
+    transform: translateX(0);
+    opacity: 1;
+  }
+}
+
+/* 加载动画 */
+.loading-spinner {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border: 2px solid rgba(255, 255, 255, 0.3);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: spin 0.8s linear infinite;
+  margin-right: 0.5rem;
+  vertical-align: middle;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* 行展开/折叠 */
+.expand-icon {
+  display: inline-block;
+  width: 16px;
+  color: #888;
+  font-size: 0.75rem;
+  margin-right: 0.5rem;
+  transition: transform 0.2s;
+}
+
+.result-row {
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.result-row:hover {
+  background: #1a2a4e;
+}
+
+.result-row.expanded {
+  background: #1a2a4e;
+}
+
+/* 复制提示图标 */
+.copy-hint {
+  display: inline-block;
+  margin-left: 0.5rem;
+  opacity: 0;
+  transition: opacity 0.2s;
+  font-size: 0.85rem;
+}
+
+.offset-cell:hover .copy-hint {
+  opacity: 0.6;
+}
+
+.offset-cell {
+  cursor: pointer;
+}
+
+.offset-cell:hover {
+  color: #00d4ff !important;
+}
+
+/* 详情行 */
+.detail-row {
+  background: #0f0f23;
+}
+
+.detail-content {
+  padding: 1.5rem;
+}
+
+.detail-section {
+  margin-bottom: 1.5rem;
+}
+
+.detail-section:last-child {
+  margin-bottom: 0;
+}
+
+.detail-section h4 {
+  color: #00d4ff;
+  font-size: 0.95rem;
+  margin-bottom: 0.75rem;
+  font-weight: 600;
+}
+
+.detail-section p {
+  color: #b0b0b0;
+  line-height: 1.6;
+  margin: 0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9rem;
+  word-break: break-all;
+}
+
+.detail-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1rem;
+}
+
+.detail-item {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25rem;
+}
+
+.detail-label {
+  color: #888;
+  font-size: 0.8rem;
+}
+
+.detail-value {
+  color: #e0e0e0;
+  font-family: 'Consolas', 'Monaco', monospace;
+  font-size: 0.9rem;
+}
+
+/* 空状态 */
+.no-results {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: #888;
+}
+
+.empty-state {
+  text-align: center;
+  padding: 4rem 2rem;
+  color: #888;
+}
+
+.empty-icon {
+  font-size: 4rem;
+  margin-bottom: 1rem;
+  opacity: 0.5;
+}
+
+.empty-state h3 {
+  color: #b0b0b0;
+  margin-bottom: 0.5rem;
+  font-size: 1.25rem;
+}
+
+.empty-state p {
+  color: #888;
+  font-size: 0.95rem;
+  line-height: 1.6;
+}
+
+/* 主按钮样式 */
+.btn-primary {
+  background: linear-gradient(135deg, #00d4ff 0%, #0099cc 100%);
+  border: none;
+  color: #fff;
+  font-weight: 600;
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: linear-gradient(135deg, #00e5ff 0%, #00aadd 100%);
+  transform: translateY(-1px);
+  box-shadow: 0 4px 12px rgba(0, 212, 255, 0.3);
+}
+
+.btn-primary:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 </style>
