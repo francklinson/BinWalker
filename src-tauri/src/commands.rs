@@ -280,6 +280,87 @@ fn recursive_scan(
             decompressed = true;
         }
 
+        // uImage: 提取内部压缩数据并递归扫描
+        if !decompressed && name_lower.contains("uimage") && extracted.len() > 64 {
+            // uImage header is 64 bytes, data starts after that
+            let inner_data = &extracted[64..];
+
+            // Try to detect and decompress the inner data based on magic bytes
+            // gzip
+            if inner_data.len() >= 2 && inner_data[0] == 0x1F && inner_data[1] == 0x8B {
+                if let Ok(dec) = decompress_gzip(inner_data) {
+                    recursive_scan(
+                        &dec,
+                        layer + 1,
+                        child_parent_offset,
+                        child_parent_name.clone(),
+                        format!("{}_inner", child_source),
+                        results,
+                        seen_offsets,
+                    );
+                    decompressed = true;
+                }
+            }
+            // lzma
+            else if inner_data.len() >= 1 && inner_data[0] == 0x5D {
+                if let Ok(dec) = decompress_lzma(inner_data) {
+                    recursive_scan(
+                        &dec,
+                        layer + 1,
+                        child_parent_offset,
+                        child_parent_name.clone(),
+                        format!("{}_inner", child_source),
+                        results,
+                        seen_offsets,
+                    );
+                    decompressed = true;
+                }
+            }
+            // xz
+            else if inner_data.len() >= 6 && inner_data[0..6] == [0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00] {
+                if let Ok(dec) = decompress_xz(inner_data) {
+                    recursive_scan(
+                        &dec,
+                        layer + 1,
+                        child_parent_offset,
+                        child_parent_name.clone(),
+                        format!("{}_inner", child_source),
+                        results,
+                        seen_offsets,
+                    );
+                    decompressed = true;
+                }
+            }
+            // bzip2
+            else if inner_data.len() >= 3 && &inner_data[0..3] == b"BZh" {
+                if let Ok(dec) = decompress_bzip2(inner_data) {
+                    recursive_scan(
+                        &dec,
+                        layer + 1,
+                        child_parent_offset,
+                        child_parent_name.clone(),
+                        format!("{}_inner", child_source),
+                        results,
+                        seen_offsets,
+                    );
+                    decompressed = true;
+                }
+            }
+            // If no compression detected, still scan the raw inner data
+            else if !inner_data.is_empty() {
+                recursive_scan(
+                    inner_data,
+                    layer + 1,
+                    child_parent_offset,
+                    child_parent_name.clone(),
+                    format!("{}_inner", child_source),
+                    results,
+                    seen_offsets,
+                );
+                decompressed = true;
+            }
+        }
+
         // 对于非压缩格式（如 ELF、PE、RSA 等），不递归扫描
         // 只有成功解压/解包的压缩格式才需要递归扫描
     }
