@@ -24,3 +24,7 @@ squashfs_test_out*
 # Firmware samples (large binary files)
 firmware_samples/
 
+# Generated test artifacts
+BinWalker_gen_*
+*_extracted/
+

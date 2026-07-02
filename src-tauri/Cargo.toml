@@ -17,7 +17,7 @@ serde_json = "1"
 binwalk = { path = "../local-binwalk" }
 tokio = { version = "1", features = ["full"] }
 flate2 = "1"
-backhand = { version = "0.19", default-features = false, features = ["gzip-zune-inflate", "lzo"] }
+backhand = { version = "0.19", default-features = false, features = ["gzip-zune-inflate", "lzo", "zstd"] }
 oxiarc-lzma = "0.3"
 lzma-rs = "0.3"
 bzip2 = "0.6"

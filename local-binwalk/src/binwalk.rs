@@ -8,12 +8,6 @@ use std::fs;
 use std::path;
 use uuid::Uuid;
 
-#[cfg(windows)]
-use std::os::windows;
-
-#[cfg(unix)]
-use std::os::unix;
-
 use crate::common::{is_offset_safe, read_file};
 use crate::extractors;
 use crate::magic;
@@ -420,7 +414,7 @@ impl Binwalk {
          * want to process/validate the signatures. Each signature's parser function will report the correct
          * starting offset for the signature, so sort the file_map by the SignatureResult.offset value.
          */
-        file_map.sort();
+        file_map.sort_by(|a, b| a.offset.cmp(&b.offset));
         next_valid_offset = 0;
 
         /*

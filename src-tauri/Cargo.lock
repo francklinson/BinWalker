@@ -215,6 +215,8 @@ dependencies = [
  "thiserror 2.0.18",
  "tracing",
  "xxhash-rust",
+ "zstd",
+ "zstd-safe",
  "zune-inflate",
 ]
 
